@@ -1,3 +1,9 @@
+# /// script
+# requires-python = ">=3.9"
+# dependencies = [
+#     "python-docx",
+# ]
+# ///
 import argparse
 import json
 import os
@@ -8,6 +14,13 @@ import time
 import urllib.request
 import zipfile
 from pathlib import Path
+
+try:
+    import docx
+    from docx.shared import Pt
+    DOCX_AVAILABLE = True
+except ImportError:
+    DOCX_AVAILABLE = False
 
 # Paths
 PANDOC_TOOL_DIR = Path.home() / ".gemini" / "tools" / "pandoc"
@@ -116,6 +129,19 @@ def convert(args):
         if temp_md_path and os.path.exists(temp_md_path):
             os.remove(temp_md_path)
             
+    if args.first_line_indent:
+        if not DOCX_AVAILABLE:
+            print("Warning: python-docx is not installed. Skipping first-line indent.", file=sys.stderr)
+        else:
+            print("Applying first-line indent...", file=sys.stderr)
+            doc = docx.Document(args.output)
+            for paragraph in doc.paragraphs:
+                # Apply to Normal and standard text styles
+                if paragraph.style.name in ['Normal', 'First Paragraph', 'Body Text']:
+                    # Pt(21) is roughly equal to a 2-character indent for standard 10.5pt font
+                    paragraph.paragraph_format.first_line_indent = Pt(21)
+            doc.save(args.output)
+            
     print(f"Success! Document successfully written to: {args.output}")
 
 def main():
@@ -126,6 +152,7 @@ def main():
     parser_convert.add_argument("--text", help="Raw text or markdown containing LaTeX formulas")
     parser_convert.add_argument("--input-file", help="Path to an existing .md file to convert")
     parser_convert.add_argument("--output", required=True, help="Destination path for the .docx file")
+    parser_convert.add_argument("--first-line-indent", action="store_true", help="Add a first-line indent to all standard paragraphs")
     
     args = parser.parse_args()
     

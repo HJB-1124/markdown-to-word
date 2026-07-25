@@ -32,6 +32,7 @@ A CLI script that handles downloading Pandoc (if missing), writing temporary Mar
 - `--text`: The raw text or markdown containing LaTeX formulas to be converted.
 - `--input-file`: The path to an existing `.md` file to convert (mutually exclusive with `--text`).
 - `--output`: (Required) Destination path for the `.docx` file.
+- `--first-line-indent`: (Optional) Adds a first-line indent (approx. 2 characters) to all standard text paragraphs in the generated document.
 
 **Examples:**
 Using direct text input:
