@@ -24,25 +24,26 @@ When invoking this skill, agents should adhere to the following rules:
 2. **Prefer `--input-file`** when the Markdown already exists on disk.
 3. **Use `--reference-doc`** when the user requests specific Word formatting or a custom template.
 4. **Do not combine** `--reference-doc` with `--first-line-indent` (the script ignores it anyway).
-5. **Supply `--resource-path`** when the Markdown contains local images.
+5. **Supply `--resource-path`** only when using `--stdin` or `--text` with local images, or when image paths should be resolved relative to a directory other than the Markdown file's directory. (When using `--input-file`, the script automatically defaults to the input file's directory).
 6. **Use `--text`** only for short, simple content.
-7. After conversion, verify that the output file exists and report its path to the user.
+7. After conversion, verify that the process exited successfully (code 0) and that the output file exists and is non-empty. Finally, report the absolute path to the user.
 
 ## Quick Start
 To use the skill, run the helper script `convert.py`.
 
-For Agents, using standard input (`--stdin`) is **highly recommended**. Here is a PowerShell example:
-
+**For Agent-generated content:** Using standard input (`--stdin`) is **highly recommended**.
 ```powershell
 # Using a Here-String in PowerShell
 @"
 # Title
 
 `$`$E=mc^2`$`$
-"@ | uv run ~/.gemini/config/skills/markdown-to-word/scripts/convert.py convert --stdin --output "output.docx"
+"@ | uv run "$HOME\.gemini\config\skills\markdown-to-word\scripts\convert.py" convert --stdin --output "output.docx"
+```
 
-# Or simply piping an existing file:
-Get-Content ".\report.md" -Raw | uv run ~/.gemini/config/skills/markdown-to-word/scripts/convert.py convert --stdin --output "output.docx"
+**For existing files:** Use `--input-file` to automatically handle resources and avoid PowerShell pipe parsing.
+```powershell
+uv run "$HOME\.gemini\config\skills\markdown-to-word\scripts\convert.py" convert --input-file ".\report.md" --output ".\output.docx"
 ```
 
 ## Utility Scripts
@@ -65,14 +66,14 @@ A CLI script that handles executing the conversion process, discovering or downl
 
 ## Examples
 
-**Using a template and an input file:**
-```bash
-uv run ~/.gemini/config/skills/markdown-to-word/scripts/convert.py convert --input-file "report.md" --output "final.docx" --reference-doc "corporate_template.docx" --resource-path "."
+**Using a template and an input file (images in a separate folder):**
+```powershell
+uv run "$HOME\.gemini\config\skills\markdown-to-word\scripts\convert.py" convert --input-file "report.md" --output "final.docx" --reference-doc "corporate_template.docx" --resource-path ".\assets\images"
 ```
 
 **Using direct text input with fallback indentation:**
-```bash
-uv run ~/.gemini/config/skills/markdown-to-word/scripts/convert.py convert --text "Hello **World**!" --output "hello.docx" --first-line-indent
+```powershell
+uv run "$HOME\.gemini\config\skills\markdown-to-word\scripts\convert.py" convert --text "Hello **World**!" --output "hello.docx" --first-line-indent
 ```
 
 ## Pandoc Resolution Order
@@ -86,5 +87,5 @@ The script locates Pandoc in the following order:
 - **Omitting Required Output**: The `--output` argument is strictly required.
 - **Providing Multiple Inputs**: Supplying more than one of `--text`, `--input-file`, or `--stdin` will result in an error. Choose exactly one.
 - **Malformed LaTeX**: If the provided LaTeX is severely malformed, Pandoc will fail to compile it and return a non-zero exit code. The script will surface stderr to help identify the parse error.
-- **Overusing `--text`**: Do not use `--text` for large reports. Use `--stdin` or write the text to a temporary `.md` file and use `--input-file` instead.
-- **Incorrect `--resource-path`**: Ensure the resource path aligns with how images are referenced in the Markdown. (e.g., if markdown has `![img](images/chart.png)`, the resource path should usually be `.`, not `./images`).
+- **Overusing `--text`**: Do not use `--text` for large reports. Use `--stdin` or `--input-file` instead.
+- **Incorrect `--resource-path`**: Ensure the resource path aligns with how images are referenced in the Markdown. If `--input-file` is used, you often don't need this parameter at all.
