@@ -13,6 +13,20 @@ This skill converts Markdown (including Pandoc-supported LaTeX mathematical form
 
 If Pandoc is not provided or found in the system `PATH`, the script safely downloads and caches a verified version (using SHA-256 integrity checks) to `~/.gemini/tools/pandoc/`.
 
+## Default Word Formatting
+When `--reference-doc` is omitted, the script applies these defaults:
+- Page: **A4 portrait (210 × 297 mm)**. Keep portrait orientation when adjusting wide tables; adjust column widths and wrapping instead.
+- Chinese text: **宋体 (SimSun)**.
+- English letters and digits outside formulas: **Times New Roman**.
+- Native Word formulas: **Cambria Math**, explicitly set in the document's math settings and equation runs; formulas remain editable.
+- Body text: **五号, 10.5 pt**, including standard paragraphs and table text.
+- Body paragraphs outside tables: **two-character first-line indent**, using Word's native character units (`firstLineChars=200`, with a 21 pt compatibility fallback). Apply automatically, including the first paragraph after headings and body paragraphs containing inline formulas. Titles, headings, standalone equations, lists and code blocks keep their own alignment; table cells remain centered with no indentation.
+- All text: **black (`#000000`)**, including headings, hyperlinks, code highlighting and formulas.
+- Table contents: **centered horizontally and vertically** in every cell, including header rows and nested tables. Clear paragraph indentation inside cells so content remains centered; center display equations inside cells too.
+- Headings retain Pandoc's heading sizes and emphasis.
+
+These defaults are applied automatically; no additional flags or template are needed. A supplied `--reference-doc` takes precedence: the script skips these built-in defaults and lets Pandoc apply the template's styles and layout.
+
 ## Dependencies
 - `uv` must be installed and available in the system path.
 - Python dependencies (such as `python-docx`) are managed automatically by `uv`.
@@ -59,9 +73,9 @@ A CLI script that handles executing the conversion process, discovering or downl
 - `--text`: The raw text or markdown to be converted via command line argument.
   *(Note: You must provide exactly ONE of `--stdin`, `--input-file`, or `--text`)*
 - `--output`: (Required) Destination path for the `.docx` file.
-- `--reference-doc`: (Optional) Path to a Word template (`.docx`) to control the main output styles and document layout.
+- `--reference-doc`: (Optional) Path to a Word template (`.docx`) to control the main output styles and document layout, overriding the built-in font, size and color defaults.
 - `--resource-path`: (Optional) Directory relative to which Markdown image paths should be resolved.
-- `--first-line-indent`: (Optional) A heuristic post-processing patch that applies an approx. 2-character indent to standard paragraphs and table cells. **Note: Automatically disabled if `--reference-doc` is used.**
+- `--first-line-indent`: (Optional, compatibility flag) Body paragraphs already receive a two-character first-line indent by default; no flag is needed. Table contents remain centered with no paragraph indentation. **Note: Ignored if `--reference-doc` is used.**
 - `--pandoc-path`: (Optional) Path to a custom pandoc executable. If valid, this takes priority over the system `PATH` and automated downloads.
 
 ## Examples
@@ -71,9 +85,9 @@ A CLI script that handles executing the conversion process, discovering or downl
 uv run "$HOME\.gemini\config\skills\markdown-to-word\scripts\convert.py" convert --input-file "report.md" --output "final.docx" --reference-doc "corporate_template.docx" --resource-path ".\assets\images"
 ```
 
-**Using direct text input with fallback indentation:**
+**Using direct text input with default formatting:**
 ```powershell
-uv run "$HOME\.gemini\config\skills\markdown-to-word\scripts\convert.py" convert --text "Hello **World**!" --output "hello.docx" --first-line-indent
+uv run "$HOME\.gemini\config\skills\markdown-to-word\scripts\convert.py" convert --text "Hello **World**!" --output "hello.docx"
 ```
 
 ## Pandoc Resolution Order

@@ -20,7 +20,9 @@ from pathlib import Path
 
 try:
     import docx
-    from docx.shared import Pt
+    from docx.oxml import OxmlElement, parse_xml
+    from docx.oxml.ns import qn
+    from lxml import etree
     DOCX_AVAILABLE = True
 except ImportError:
     DOCX_AVAILABLE = False
@@ -32,6 +34,182 @@ PANDOC_ZIP_URL = f"https://github.com/jgm/pandoc/releases/download/{PANDOC_VERSI
 PANDOC_EXPECTED_SHA256 = "347b250e855d0cb4bf9e7dcda3b55a2b5bdae588e637a363810008b75be5ca81"
 PANDOC_EXE_DIR = PANDOC_TOOL_DIR / f"pandoc-{PANDOC_VERSION}"
 PANDOC_EXE = PANDOC_EXE_DIR / "pandoc.exe"
+
+DEFAULT_EAST_ASIA_FONT = "宋体"
+DEFAULT_LATIN_FONT = "Times New Roman"
+DEFAULT_MATH_FONT = "Cambria Math"
+DEFAULT_BODY_SIZE_HALF_POINTS = "21"  # 五号 = 10.5 pt; Word stores half-points.
+DEFAULT_FIRST_LINE_CHARS = "200"  # Word stores firstLineChars in hundredths of a character.
+DEFAULT_FIRST_LINE_TWIPS = "420"  # 21 pt fallback for readers without character-unit support.
+DEFAULT_PAGE_WIDTH_TWIPS = "11906"  # A4 portrait: 210 x 297 mm.
+DEFAULT_PAGE_HEIGHT_TWIPS = "16838"
+
+
+def apply_default_formatting(output_path):
+    """Apply the built-in typography when no reference document is supplied."""
+    def get_or_add(parent, tag, first=False):
+        child = parent.find(qn(tag))
+        if child is None:
+            child = OxmlElement(tag)
+            if first:
+                parent.insert(0, child)
+            else:
+                parent.append(child)
+        return child
+
+    def set_fonts(fonts, latin=DEFAULT_LATIN_FONT, east_asia=DEFAULT_EAST_ASIA_FONT):
+        for attribute in ("asciiTheme", "hAnsiTheme", "eastAsiaTheme", "csTheme", "cstheme"):
+            fonts.attrib.pop(qn(f"w:{attribute}"), None)
+        for attribute in ("ascii", "hAnsi", "cs"):
+            fonts.set(qn(f"w:{attribute}"), latin)
+        fonts.set(qn("w:eastAsia"), east_asia)
+
+    def set_black(color):
+        color.attrib.clear()
+        color.set(qn("w:val"), "000000")
+
+    def set_body_size(properties):
+        size = properties.get_or_add_sz()
+        size.set(qn("w:val"), DEFAULT_BODY_SIZE_HALF_POINTS)
+        complex_size = properties.find(qn("w:szCs"))
+        if complex_size is None:
+            complex_size = OxmlElement("w:szCs")
+            size.addnext(complex_size)
+        complex_size.set(qn("w:val"), DEFAULT_BODY_SIZE_HALF_POINTS)
+
+    def set_first_line(paragraph, indent_body):
+        indent = paragraph.get_or_add_pPr().get_or_add_ind()
+        for attribute in ("hanging", "hangingChars"):
+            indent.attrib.pop(qn(f"w:{attribute}"), None)
+        indent.set(qn("w:firstLineChars"), DEFAULT_FIRST_LINE_CHARS if indent_body else "0")
+        indent.set(qn("w:firstLine"), DEFAULT_FIRST_LINE_TWIPS if indent_body else "0")
+
+    with zipfile.ZipFile(output_path) as source:
+        entries = [(info, source.read(info)) for info in source.infolist()]
+
+    updated_entries = []
+    for info, data in entries:
+        if info.filename.startswith("word/") and info.filename.endswith(".xml"):
+            root = parse_xml(data)
+            if info.filename == "word/styles.xml":
+                defaults = get_or_add(root, "w:docDefaults")
+                properties = get_or_add(get_or_add(defaults, "w:rPrDefault"), "w:rPr")
+                set_body_size(properties)
+                body_styles = {
+                    "Normal", "BodyText", "FirstParagraph", "BodyTextChar", "Compact", "VerbatimChar"
+                }
+                for style in root.findall(qn("w:style")):
+                    properties = style.get_or_add_rPr()
+                    if style.get(qn("w:styleId")) in body_styles:
+                        set_body_size(properties)
+                for properties in root.iter(qn("w:rPr")):
+                    set_fonts(properties.get_or_add_rFonts())
+
+            elif info.filename == "word/document.xml":
+                for section in root.iter(qn("w:sectPr")):
+                    page_size = section.get_or_add_pgSz()
+                    page_size.set(qn("w:w"), DEFAULT_PAGE_WIDTH_TWIPS)
+                    page_size.set(qn("w:h"), DEFAULT_PAGE_HEIGHT_TWIPS)
+                    page_size.set(qn("w:orient"), "portrait")
+
+                body_paragraph_styles = {"Normal", "BodyText", "FirstParagraph", "正文", "首段"}
+                for paragraph in root.iter(qn("w:p")):
+                    if any(ancestor.tag == qn("w:tc") for ancestor in paragraph.iterancestors()):
+                        continue
+                    properties = paragraph.find(qn("w:pPr"))
+                    style = properties.find(qn("w:pStyle")) if properties is not None else None
+                    style_id = style.get(qn("w:val")) if style is not None else "Normal"
+                    if style_id not in body_paragraph_styles:
+                        continue
+                    if properties is not None and properties.find(qn("w:numPr")) is not None:
+                        continue
+                    has_text = any((text.text or "").strip() for text in paragraph.iter(qn("w:t")))
+                    has_math = any(True for _ in paragraph.iter(qn("m:oMath")))
+                    has_display_math = any(True for _ in paragraph.iter(qn("m:oMathPara")))
+                    if has_display_math or (has_math and not has_text):
+                        set_first_line(paragraph, False)
+                    elif has_text:
+                        set_first_line(paragraph, True)
+
+            elif info.filename == "word/settings.xml":
+                math_properties = root.find(qn("m:mathPr"))
+                if math_properties is None:
+                    math_properties = OxmlElement("m:mathPr")
+                    root.insert_element_before(
+                        math_properties, "w:uiCompat97To2003", "w:attachedSchema",
+                        "w:themeFontLang", "w:clrSchemeMapping", "w:doNotIncludeSubdocsInStats",
+                        "w:doNotAutoCompressPictures", "w:forceUpgrade", "w:captions",
+                        "w:readModeInkLockDown", "w:smartTagType", "w:shapeDefaults",
+                        "w:doNotEmbedSmartTags", "w:decimalSymbol", "w:listSeparator",
+                    )
+                get_or_add(math_properties, "m:mathFont", first=True).set(qn("m:val"), DEFAULT_MATH_FONT)
+
+            elif info.filename.startswith("word/theme/"):
+                # Match the theme to explicit styles so inherited text is consistent.
+                for tag in ("a:majorFont", "a:minorFont"):
+                    for family in root.iter(qn(tag)):
+                        for tag_name, font in (
+                            ("a:latin", DEFAULT_LATIN_FONT),
+                            ("a:ea", DEFAULT_EAST_ASIA_FONT),
+                            ("a:cs", DEFAULT_LATIN_FONT),
+                        ):
+                            face = family.find(qn(tag_name))
+                            if face is not None:
+                                face.set("typeface", font)
+                        for face in family.findall(qn("a:font")):
+                            if face.get("script") in {"Hans", "Hant"}:
+                                face.set("typeface", DEFAULT_EAST_ASIA_FONT)
+
+            # Native equation text uses the math font rather than body-text styles.
+            for formula in root.iter(qn("m:oMath")):
+                for run in formula.iter(qn("m:r")):
+                    properties = run.find(qn("w:rPr"))
+                    if properties is None:
+                        properties = OxmlElement("w:rPr")
+                        math_run_properties = run.find(qn("m:rPr"))
+                        if math_run_properties is None:
+                            run.insert(0, properties)
+                        else:
+                            math_run_properties.addnext(properties)
+                for properties in formula.iter(qn("w:rPr")):
+                    set_fonts(properties.get_or_add_rFonts(), DEFAULT_MATH_FONT, DEFAULT_MATH_FONT)
+
+            # Cover nested tables and tables in headers, footers and footnotes too.
+            for cell in root.iter(qn("w:tc")):
+                cell.get_or_add_tcPr().get_or_add_vAlign().set(qn("w:val"), "center")
+                for paragraph in cell.iter(qn("w:p")):
+                    properties = paragraph.get_or_add_pPr()
+                    properties.get_or_add_jc().set(qn("w:val"), "center")
+                    indent = properties.get_or_add_ind()
+                    indent.attrib.clear()
+                    for attribute in ("left", "right", "firstLine", "firstLineChars"):
+                        indent.set(qn(f"w:{attribute}"), "0")
+                for math_paragraph in cell.iter(qn("m:oMathPara")):
+                    properties = get_or_add(math_paragraph, "m:oMathParaPr", first=True)
+                    get_or_add(properties, "m:jc").set(qn("m:val"), "center")
+
+            # Include direct formatting, syntax highlighting, hyperlinks, footnotes,
+            # headers, footers, numbering and native math control properties.
+            for properties in root.iter(qn("w:rPr")):
+                set_black(properties.get_or_add_color())
+            for color in root.iter(qn("w:color")):
+                set_black(color)
+            data = etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
+        updated_entries.append((info, data))
+
+    # Replace only after the complete archive has been written successfully.
+    output_path = Path(output_path)
+    fd, temporary_path = tempfile.mkstemp(suffix=".docx", dir=output_path.resolve().parent)
+    os.close(fd)
+    try:
+        with zipfile.ZipFile(temporary_path, "w") as destination:
+            for info, data in updated_entries:
+                destination.writestr(info, data)
+        os.replace(temporary_path, output_path)
+    finally:
+        if os.path.exists(temporary_path):
+            os.remove(temporary_path)
+
 
 class RateLimitError(Exception):
     pass
@@ -128,6 +306,10 @@ def convert(args):
     if inputs_provided > 1:
         print("Error: Provide only one of --text, --input-file, or --stdin.", file=sys.stderr)
         sys.exit(1)
+
+    if not args.reference_doc and not DOCX_AVAILABLE:
+        print("Error: Default formatting requires python-docx. Run this script with uv run.", file=sys.stderr)
+        sys.exit(1)
         
     pandoc_exe = ensure_pandoc_installed(args.pandoc_path)
     
@@ -175,28 +357,12 @@ def convert(args):
         if temp_md_path and os.path.exists(temp_md_path):
             os.remove(temp_md_path)
             
-    if args.first_line_indent:
-        if args.reference_doc:
-            print("Notice: --reference-doc is used. Skipping --first-line-indent (assume template handles indentation).", file=sys.stderr)
-        elif not DOCX_AVAILABLE:
-            print("Warning: python-docx is not installed. Skipping first-line indent.", file=sys.stderr)
-        else:
-            print("Applying first-line indent...", file=sys.stderr)
-            doc = docx.Document(args.output)
-            
-            def apply_indent(container):
-                for paragraph in container.paragraphs:
-                    # Apply to standard text styles, including potential localized names
-                    if paragraph.style.name in ['Normal', 'First Paragraph', 'Body Text', '正文', '首段']:
-                        # Pt(21) is roughly equal to a 2-character indent for standard 10.5pt font
-                        paragraph.paragraph_format.first_line_indent = Pt(21)
-                for table in getattr(container, 'tables', []):
-                    for row in table.rows:
-                        for cell in row.cells:
-                            apply_indent(cell)
-                            
-            apply_indent(doc)
-            doc.save(args.output)
+    if args.first_line_indent and args.reference_doc:
+        print("Notice: --reference-doc is used. Skipping --first-line-indent (assume template handles indentation).", file=sys.stderr)
+
+    if not args.reference_doc:
+        print("Applying A4 portrait, default fonts/colors, two-character body indents and centered table contents...", file=sys.stderr)
+        apply_default_formatting(args.output)
             
     print(f"Success! Document successfully written to: {args.output}")
 
@@ -209,9 +375,9 @@ def main():
     parser_convert.add_argument("--input-file", help="Path to an existing .md file to convert")
     parser_convert.add_argument("--stdin", action="store_true", help="Read raw text or markdown from standard input")
     parser_convert.add_argument("--output", required=True, help="Destination path for the .docx file")
-    parser_convert.add_argument("--first-line-indent", action="store_true", help="Add a first-line indent to all standard paragraphs")
+    parser_convert.add_argument("--first-line-indent", action="store_true", help="Compatibility flag; body paragraphs already default to a two-character first-line indent")
     parser_convert.add_argument("--pandoc-path", help="Path to a custom pandoc executable")
-    parser_convert.add_argument("--reference-doc", help="Path to a Word template (.docx) to style the output")
+    parser_convert.add_argument("--reference-doc", help="Path to a Word template (.docx); overrides built-in formatting")
     parser_convert.add_argument("--resource-path", help="Path to search for images and other resources")
     
     args = parser.parse_args()
