@@ -20,7 +20,9 @@ When `--reference-doc` is omitted, the script applies these defaults:
 - English letters and digits outside formulas: **Times New Roman**.
 - Native Word formulas: **Cambria Math**, explicitly set in the document's math settings and equation runs; formulas remain editable.
 - Body text: **五号, 10.5 pt**, including standard paragraphs and table text.
-- Body paragraphs outside tables: **two-character first-line indent**, using Word's native character units (`firstLineChars=200`, with a 21 pt compatibility fallback). Apply automatically, including the first paragraph after headings and body paragraphs containing inline formulas. Titles, headings, standalone equations, lists and code blocks keep their own alignment; table cells remain centered with no indentation.
+- Body paragraph style: **Normal**, displayed as **正文** in Chinese Word/WPS. Normalize Pandoc's `FirstParagraph` and `BodyText` paragraphs to this built-in style while retaining their paragraph spacing.
+- Body paragraphs outside tables: **two-character first-line indent**, defined in the **Normal style itself** using Word's native character units (`firstLineChars=200`, with a 21 pt compatibility fallback). Body paragraphs inherit this setting, including the first paragraph after headings and paragraphs containing inline formulas. Reapplying Normal or creating another body paragraph retains the indent. Titles, headings, standalone equations, lists and code blocks keep their own alignment; table cells remain centered with no indentation.
+- Bullet and numbered lists: preserve their list styles, numbering and indentation. Pandoc's tight lists keep **Compact**, with the same body fonts, size and black color; do not normalize lists to Normal or apply the body first-line indent.
 - All text: **black (`#000000`)**, including headings, hyperlinks, code highlighting and formulas.
 - Table contents: **centered horizontally and vertically** in every cell, including header rows and nested tables. Clear paragraph indentation inside cells so content remains centered; center display equations inside cells too.
 - Headings retain Pandoc's heading sizes and emphasis.

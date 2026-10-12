@@ -87,6 +87,58 @@ def apply_default_formatting(output_path):
     with zipfile.ZipFile(output_path) as source:
         entries = [(info, source.read(info)) for info in source.infolist()]
 
+    # WPS may replace Pandoc's style IDs with numeric IDs when saving a DOCX.
+    # Resolve paragraph styles by their names as well as their original IDs.
+    styles_root = parse_xml(next(data for info, data in entries if info.filename == "word/styles.xml"))
+    paragraph_styles = {
+        style.get(qn("w:styleId")): style
+        for style in styles_root.findall(qn("w:style"))
+        if style.get(qn("w:type")) == "paragraph"
+    }
+
+    def style_key(value):
+        return (value or "").replace(" ", "").replace("_", "").casefold()
+
+    body_names = {"normal", "bodytext", "firstparagraph", "正文", "正文文本", "首段"}
+    body_style_ids = set()
+    normal_style_id = None
+    for style_id, style in paragraph_styles.items():
+        name = style.find(qn("w:name"))
+        name_key = style_key(name.get(qn("w:val"))) if name is not None else ""
+        if name_key in body_names or style_key(style_id) in body_names:
+            body_style_ids.add(style_id)
+        if name_key in {"normal", "正文"} or style_id == "Normal":
+            normal_style_id = style_id
+    if normal_style_id is None:
+        normal_style_id = next(
+            style_id for style_id, style in paragraph_styles.items()
+            if style.get(qn("w:default")) in {"1", "true"}
+        )
+    body_style_ids.add(normal_style_id)
+
+    def inherited_attributes(style_id, property_tag):
+        chain, seen = [], set()
+        while style_id in paragraph_styles and style_id not in seen:
+            seen.add(style_id)
+            style = paragraph_styles[style_id]
+            chain.append(style)
+            base = style.find(qn("w:basedOn"))
+            style_id = base.get(qn("w:val")) if base is not None else None
+        attributes = {}
+        for style in reversed(chain):
+            properties = style.find(qn("w:pPr"))
+            value = properties.find(qn(property_tag)) if properties is not None else None
+            if value is not None:
+                attributes.update(value.attrib)
+        return attributes
+
+    original_spacing = {
+        style_id: inherited_attributes(style_id, "w:spacing") for style_id in body_style_ids
+    }
+    original_indentation = {
+        style_id: inherited_attributes(style_id, "w:ind") for style_id in paragraph_styles
+    }
+
     updated_entries = []
     for info, data in entries:
         if info.filename.startswith("word/") and info.filename.endswith(".xml"):
@@ -99,9 +151,24 @@ def apply_default_formatting(output_path):
                     "Normal", "BodyText", "FirstParagraph", "BodyTextChar", "Compact", "VerbatimChar"
                 }
                 for style in root.findall(qn("w:style")):
+                    style_id = style.get(qn("w:styleId"))
                     properties = style.get_or_add_rPr()
-                    if style.get(qn("w:styleId")) in body_styles:
+                    if style_id in body_styles or style_id in body_style_ids:
                         set_body_size(properties)
+                    if style.get(qn("w:type")) == "paragraph":
+                        if style_id == normal_style_id:
+                            # Store body indentation in Normal itself, so reapplying
+                            # the style or adding a new paragraph retains two characters.
+                            set_first_line(style, True)
+                        else:
+                            # Preserve the previous effective indentation of other
+                            # styles instead of inheriting Normal's new body indent.
+                            indent = style.get_or_add_pPr().get_or_add_ind()
+                            previous = original_indentation.get(style_id, {})
+                            for attribute in ("firstLine", "firstLineChars"):
+                                key = qn(f"w:{attribute}")
+                                if key not in indent.attrib:
+                                    indent.set(key, previous.get(key, "0"))
                 for properties in root.iter(qn("w:rPr")):
                     set_fonts(properties.get_or_add_rFonts())
 
@@ -112,24 +179,42 @@ def apply_default_formatting(output_path):
                     page_size.set(qn("w:h"), DEFAULT_PAGE_HEIGHT_TWIPS)
                     page_size.set(qn("w:orient"), "portrait")
 
-                body_paragraph_styles = {"Normal", "BodyText", "FirstParagraph", "正文", "首段"}
                 for paragraph in root.iter(qn("w:p")):
-                    if any(ancestor.tag == qn("w:tc") for ancestor in paragraph.iterancestors()):
-                        continue
                     properties = paragraph.find(qn("w:pPr"))
                     style = properties.find(qn("w:pStyle")) if properties is not None else None
-                    style_id = style.get(qn("w:val")) if style is not None else "Normal"
-                    if style_id not in body_paragraph_styles:
+                    style_id = style.get(qn("w:val")) if style is not None else normal_style_id
+                    if style_id not in body_style_ids:
                         continue
                     if properties is not None and properties.find(qn("w:numPr")) is not None:
                         continue
+                    properties = paragraph.get_or_add_pPr()
+                    # BodyText/FirstParagraph can have different paragraph spacing.
+                    # Preserve it while replacing their style with the built-in Normal.
+                    for attribute, value in original_spacing.get(style_id, {}).items():
+                        if value != original_spacing[normal_style_id].get(attribute):
+                            spacing = get_or_add(properties, "w:spacing")
+                            if attribute not in spacing.attrib:
+                                spacing.set(attribute, value)
+                    properties.get_or_add_pStyle().set(qn("w:val"), normal_style_id)
+                    if any(ancestor.tag == qn("w:tc") for ancestor in paragraph.iterancestors()):
+                        continue  # The table pass below clears all cell indentation.
                     has_text = any((text.text or "").strip() for text in paragraph.iter(qn("w:t")))
                     has_math = any(True for _ in paragraph.iter(qn("m:oMath")))
                     has_display_math = any(True for _ in paragraph.iter(qn("m:oMathPara")))
                     if has_display_math or (has_math and not has_text):
                         set_first_line(paragraph, False)
                     elif has_text:
-                        set_first_line(paragraph, True)
+                        # Inherit from Normal rather than relying on direct formatting.
+                        indent = properties.find(qn("w:ind"))
+                        if indent is not None:
+                            for attribute in ("firstLine", "firstLineChars", "hanging", "hangingChars"):
+                                indent.attrib.pop(qn(f"w:{attribute}"), None)
+                            if not indent.attrib:
+                                properties.remove(indent)
+                    else:
+                        # Empty separators/image-only paragraphs are layout blocks,
+                        # not prose; do not shift their borders or anchored content.
+                        set_first_line(paragraph, False)
 
             elif info.filename == "word/settings.xml":
                 math_properties = root.find(qn("m:mathPr"))
