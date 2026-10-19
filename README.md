@@ -1,70 +1,140 @@
-# Markdown 转 Word 转换器 (markdown-to-word)
+# Markdown 转 Word 转换器
 
-这是一个专为大语言模型（Agent）设计的**输出适配器**与**文档渲染编译器**。它的核心作用是将 Agent 生成的 Markdown（包含复杂的 LaTeX 数学公式）稳定、可靠地转换为结构化且公式原生的 Microsoft Word (`.docx`) 文件。
+将 Markdown 和 Pandoc 支持的 LaTeX 数学公式转换为 Microsoft Word（`.docx`）。公式使用 Word 原生 OMML 格式，可在 Word/WPS 中继续编辑。
 
-## 一、核心定位：Agent 的“最后一公里”
+仓库同时提供供 Agent 使用的 [SKILL.md](SKILL.md)、[转换脚本](scripts/convert.py)和[回归测试](scripts/test_convert.py)。
 
-**让 Agent 只负责内容和语义，让 Pandoc 负责 Word 文件结构。**
+## 快速开始
 
-直接让大语言模型使用 Python 代码（如 `python-docx`）操作 Word 的底层 XML 结构不仅容易出错，且难以维护。本工具将“写作问题”与“文档工程问题”彻底解耦：Agent 只需要输出它最擅长的 Markdown 文本，本工具负责将其统一编译为人类工作环境中常要求的 `.docx` 交付物。
+需要安装 `uv`，Python 依赖由 `uv run` 自动管理。以下命令在仓库目录执行，示例使用 PowerShell。
 
-## 二、核心特性与实际价值
+```powershell
+git clone https://github.com/HJB-1124/markdown-to-word.git
+cd markdown-to-word
+uv run scripts/convert.py convert --input-file "notes.md" --output "notes.docx"
+```
 
-### 1. 原生 Word 数学公式 (OMML) 支持（最大亮点）
-很多普通的 Word 生成方案无法将 LaTeX 公式转化为真正的 Word 公式，通常只能呈现为纯文本或插入为静态截图。
-本工具底层调用 Pandoc，能将 Markdown 中的 LaTeX 数学表达式完美转换为 Word 原生的 **OMML (Office Math Markup Language)**。生成的公式是**可点击、可编辑的**。这对生成数学作业、工程报告、物理论文尤为重要。
+输入文件使用 UTF-8 编码，支持 `.md` 和包含 Markdown 的 `.txt` 文件。脚本显式按 Markdown 解析输入，文件扩展名不会改变公式解析方式。本地图片默认相对于输入文件所在目录查找。
 
-### 2. 默认 Word 排版标准
+Pandoc 按以下顺序查找：
 
-未指定 `--reference-doc` 时，转换器自动应用以下格式，无需额外参数：
+1. `--pandoc-path` 指定的可执行文件。
+2. 系统 `PATH` 中的 Pandoc。
+3. `~/.gemini/tools/pandoc/` 中的缓存版本。
+4. 均未找到时，下载内置的 Windows x86-64 版本并校验 SHA-256。
 
-| 项目 | 默认标准 | 适用范围与说明 |
-| --- | --- | --- |
-| 纸张与方向 | **A4 纵向（210 × 297 毫米）** | 宽表格也保持纵向；需要时调整列宽和换行。 |
-| 中文字体 | **宋体** | 公式外的中文文字。 |
-| 英文和数字字体 | **Times New Roman** | 公式外的英文字母和数字。 |
-| 数学公式字体 | **Cambria Math** | 行内公式与独立公式均使用原生、可编辑的 Word 公式。 |
-| 正文字号 | **五号（10.5 磅）** | 常规正文段落与表格正文。 |
-| 正文段落样式 | **正文（Normal）** | 将 Pandoc 的 `FirstParagraph` 和 `BodyText` 段落统一到内置“正文”样式，并保留原有段间距。 |
-| 正文首行缩进 | **2 个字符，定义在“正文”样式中** | 表格外的正文，包括标题后的首段和含行内公式的正文段落；重新应用“正文”或新增正文段落时仍保留缩进。 |
-| 项目符号与编号列表 | **保留列表样式和编号规则** | 紧凑列表保留 Pandoc 的 `Compact` 样式及列表缩进，不套用普通正文的首行缩进 2 字符。 |
-| 文字颜色 | **黑色（`#000000`）** | 全文文字，包括标题、超链接、代码高亮和公式。 |
-| 表格内容对齐 | **水平居中、垂直居中** | 表头、正文和嵌套表格均适用；单元格内段落不缩进，独立公式也居中。 |
+macOS 和 Linux 请预先安装 Pandoc，或通过 `--pandoc-path` 指定路径。
 
-正文缩进使用 Word 原生的“首行缩进 2 字符”属性，并提供 21 磅的兼容值，写入“正文”（Normal）样式，由普通正文段落继承，不在文本前插入空格。标题、独立公式、列表和代码块保留各自的对齐方式；标题保留 Pandoc 默认的层级字号和加粗等强调格式。表格与独立公式明确取消首行缩进，避免继承正文缩进。
+## 公式写法与编号
 
-在 Word/WPS 中，普通段落显示为“正文”，而带圆点或数字的紧凑列表显示为 `Compact`，属于正常的样式分工。列表仍使用宋体、Times New Roman、五号和黑色；项目符号、编号与换行后的对齐由列表规则控制，无需将列表手动改成“正文”。
+同时支持两组 LaTeX 分隔符：
 
-### 3. 自定义 Word 模板 (`--reference-doc`)
+| 类型 | 支持的写法 |
+| --- | --- |
+| 行内公式 | `\(...\)`、`$...$` |
+| 独立公式 | `\[...\]`、`$$...$$` |
 
-工具支持传入您配置好的 Word 模板文件 (`.docx`)。**模板优先于内置默认格式**：使用 `--reference-doc` 时，转换器跳过上述默认排版处理，由 Pandoc 按模板样式和布局生成文档。
+例如，以下 Markdown 会生成 1 个行内公式和 2 个独立公式：
 
-`--first-line-indent` 仅为兼容旧命令而保留。默认转换已经自动缩进正文，不需要该参数；使用模板时，该参数会被忽略。
+```markdown
+模型参数为 \(\theta\)。
 
-### 4. Agent 工作流深度集成
-- **管道流支持 (`--stdin`)**：允许大段内容直接通过系统标准输入送入转换器，避免大量 LaTeX 语法被 Shell 转义破坏或触碰命令行参数长度上限。
-- **本地图片支持 (`--resource-path`)**：可显式指定资源路径，确保图片被正确打包入 Word。
-- **安全的执行环境**：内置基于 SHA-256 哈希完整性校验的 Pandoc 自动化下载管理，并优先复用系统自带的 Pandoc 环境。
+\[
+\hat{y}=f_\theta(x),\qquad x\in X \tag{1}
+\]
 
-## 三、快速开始
+$$
+\begin{cases}
+x'=x+\delta\\
+y'=f_\theta(x')
+\end{cases}
+$$
+```
 
-本工具通过 `scripts/convert.py` 提供 CLI 接口。先安装 `uv` 并确保它可在命令行中使用，Python 依赖由 `uv run` 自动管理。
+`\tag{n}` 保留为带括号的编号，`\tag*{label}` 保留为不加括号的标签。标签作为可编辑的公式文字显示，不是 Word 自动编号或交叉引用字段。
 
-Pandoc 按以下顺序查找：`--pandoc-path` 指定的路径、系统 `PATH`、本地缓存。均未找到时，脚本会下载 Windows x86-64 版本并校验 SHA-256；macOS 和 Linux 请先安装 Pandoc 或使用 `--pandoc-path`。
+代码块和行内代码保持字面内容。普通文字或加粗文字中的表达式不会自动变成公式；需要原生 Word 公式时，应先在源文中添加上述分隔符。LaTeX 公式环境也应放在数学分隔符内部。
 
-以下命令在 skill 目录运行，示例使用 PowerShell。LaTeX 行内公式使用 `$...$`，独立公式使用 `$$...$$`。
+## 转换校验与失败处理
 
-### 1. 转换直接传入的文本
+转换器先解析 Pandoc JSON 文档，再生成并检查 DOCX：
+
+- 显式启用反斜杠与美元符号公式分隔符。
+- 保留公式标签，并检查正文、脚注和尾注中的原生公式数量、独立公式数量、非空公式对象及简单显式标签。
+- 显示 Pandoc 的诊断信息；遇到转换警告、不支持的公式或会在 Word 中丢失的原始 TeX 时，以非零退出码结束。
+- 先生成临时文件，通过格式处理、ZIP 完整性检查和公式校验后，才替换目标文件。失败时保留已有目标文件。
+
+成功时会输出校验摘要，例如：
+
+```text
+Validated 3 native Word equations (2 display, 1 inline); preserved 1 equation labels.
+Success! Document successfully written to: ...
+```
+
+公式数量来自已解析的正文及实际输出的标题、作者、摘要等元数据。结构校验用于发现公式丢失、回退为文本等转换问题；原文的数学正确性和最终页面布局仍需按文档用途检查。
+
+## 清理粘贴文本中的来源文件名
+
+从聊天或论文译文复制的内容中，可能残留如下来源标记：
+
+```text
+(2024TPAMI)Paper_Name…
+(2026IF)Multi-modal Attack Surv…
+```
+
+脚本默认检测并提示匹配到的标记。需要生成清理后的阅读文档时，使用：
+
+```powershell
+uv run scripts/convert.py convert --input-file "translation.txt" --output "translation.docx" --strip-source-markers
+```
+
+`--strip-source-markers` 仅删除匹配规则的来源文件名标记，并报告数量；代码示例、公式和 `[1]` 等文献引用编号保持原样。
+
+## 默认 Word 排版
+
+未指定 `--reference-doc` 时自动应用以下格式：
+
+| 项目 | 默认格式 |
+| --- | --- |
+| 页面 | A4 纵向，210 × 297 毫米 |
+| 中文正文 | 宋体，五号（10.5 磅） |
+| 英文与数字 | Times New Roman，五号（10.5 磅） |
+| 原生公式 | Cambria Math，可编辑 |
+| 正文样式 | 内置 Normal，在中文 Word/WPS 中显示为“正文” |
+| 首行缩进 | 在 Normal 样式中定义为 2 个字符，并提供 21 磅兼容值 |
+| 列表 | 保留编号、项目符号及原有列表缩进；紧凑列表使用 Compact |
+| 标题 | 保留 Pandoc 的标题层级、字号和强调 |
+| 文字颜色 | 全文黑色，包括超链接、代码高亮和公式 |
+| 表格 | 所有单元格内容水平、垂直居中；取消单元格内段落缩进 |
+
+标题、独立公式、列表和代码块保留各自的对齐方式。正文通过样式继承首行缩进，重新应用 Normal 或新建正文段落时仍可保留。查看文档的设备需要安装相应字体；宽表格与长公式可能需要调整列宽或换行。
+
+### 使用 Word 模板
+
+```powershell
+uv run scripts/convert.py convert --input-file "notes.md" --output "notes.docx" --reference-doc "my_template.docx"
+```
+
+提供模板时，脚本跳过内置排版，由 Pandoc 使用模板样式和布局；公式解析与完整性校验仍然执行。`--first-line-indent` 仅保留用于兼容旧命令，默认正文已缩进；使用模板时该参数被忽略。
+
+## 输入方式与资源路径
+
+### 短文本
+
 ```powershell
 uv run scripts/convert.py convert --text '质能方程：$E=mc^2$。' --output "formula.docx"
 ```
 
-### 2. 通过标准输入转换（推荐 Agent 使用）
+### 标准输入
+
+标准输入按 UTF-8 读取。通过 PowerShell 管道传递中文时，需使用 UTF-8 编码；以下示例在当前会话设置管道编码，并使用单引号 Here-String 保留公式中的美元符号和反斜杠：
+
 ```powershell
+$OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 @'
 # LQR 学习笔记
 
-性能指标定义如下：
+性能指标：
 
 $$
 J = \int_0^\infty (x^T Q x + u^T R u)\,dt
@@ -72,42 +142,43 @@ $$
 '@ | uv run scripts/convert.py convert --stdin --output "lqr.docx"
 ```
 
-### 3. 转换已有 Markdown 文件
+### 本地图片
+
+使用 `--input-file` 时，图片默认相对于源文件目录解析。使用 `--stdin`、`--text`，或需要从其他目录读取图片时，可指定：
 
 ```powershell
-uv run scripts/convert.py convert --input-file "notes.md" --output "notes.docx"
+uv run scripts/convert.py convert --input-file "notes.md" --output "notes.docx" --resource-path ".\assets"
 ```
 
-此命令自动应用上表中的默认排版。Markdown 中的本地图片默认相对于输入文件所在目录解析。
+## 命令行参数
 
-### 4. 应用 Word 模板
+| 参数 | 说明 |
+| --- | --- |
+| `--input-file PATH` | 读取 UTF-8 Markdown 或文本文件 |
+| `--stdin` | 从标准输入读取 UTF-8 Markdown |
+| `--text TEXT` | 直接传入短文本或 Markdown |
+| `--output PATH` | 必需，输出文件路径须以 `.docx` 结尾，父目录须已存在 |
+| `--reference-doc PATH` | 使用 Word 模板，替代内置排版 |
+| `--resource-path PATH` | 指定本地图片等资源所在目录 |
+| `--pandoc-path PATH` | 指定 Pandoc 可执行文件 |
+| `--strip-source-markers` | 删除匹配的来源文件名残留；默认仅检测提示 |
+| `--first-line-indent` | 兼容参数；默认正文已有两字符首行缩进 |
+
+`--input-file`、`--stdin` 和 `--text` 必须且只能选择一种。
+
+## 回归测试
+
+修改转换器后运行：
 
 ```powershell
-uv run scripts/convert.py convert --input-file "notes.md" --output "notes.docx" --reference-doc "my_template.docx"
+uv run scripts/test_convert.py
 ```
 
-**命令行参数说明:**
+当前包含 9 项行为回归测试，覆盖混合公式分隔符、希腊字母、上下标、分段公式、公式标签、转换失败时保护旧文件、引用残留清理、代码保护、UTF-8 中文输入、Word 模板、脚注、列表、表格与相对路径图片。测试产物写入临时目录；需要可用的 Pandoc，未找到时测试会跳过。
 
-- `--text`: 直接传入包含 Markdown/LaTeX 的字符串。
-- `--input-file`: 传入现有的 `.md` 文件路径。
-- `--stdin`: 从标准输入读取纯文本或 Markdown（与以上两者互斥）。
-- `--output`: **(必需)** 指定输出 `.docx` 文件的路径。
-- `--reference-doc`: (可选) 传入自定义的 Word 模板文件（`.docx`），跳过内置默认排版处理，由 Pandoc 应用模板的样式和布局。
-- `--first-line-indent`: (兼容旧命令) 正文默认已首行缩进 2 个字符，无需额外传入该参数；表格内容仍保持居中且不缩进。使用 `--reference-doc` 时忽略该参数，按模板生成文档。
-- `--resource-path`: (可选) 指定 Markdown 中引用的本地图片资源所在目录。
-- `--pandoc-path`: (可选) 指定自定义的 Pandoc 可执行文件路径。
+## 范围与限制
 
-`--text`、`--input-file` 和 `--stdin` 三种输入方式必须且只能选择一种。
-
-## 四、适用场景
-
-- **含公式的学术/技术文档**：将 Agent 生成的推导过程、物理模型等一键编译为公式可编辑的 Word 成果。
-- **自动化文档流水线**：结合模板文件，将大量 Markdown 笔记自动化转换为统一排版规范的 Word 文件。
-
-## 五、当前版本的局限性与边界
-
-作为一个轻量级的公式友好型转换器，本工具目前主要解决“内容生成与公式排版”的基础需求。在某些特定场景下仍有以下局限：
-
-1. **自动化下载仅限 Windows x86-64**：macOS 和 Linux 用户需自行安装 Pandoc，并通过系统 `PATH` 或 `--pandoc-path` 提供可执行文件。
-2. **字体显示依赖本机字体**：查看或渲染文档的设备应安装宋体、Times New Roman 和 Cambria Math；缺少字体时，应用程序可能使用替代字体。
-3. **复杂页面布局仍需检查**：默认保持 A4 纵向；宽表格和较长公式可能需要调整列宽、换行或使用模板。转换器不会自动将页面改为横向。
+- LaTeX 支持范围取决于 Pandoc；出现不支持的命令时，应根据诊断修改公式。
+- 输入中的加粗表达式、未明确标记的数学文字和不完整的分隔符需要先整理为有效 Markdown 数学语法。
+- 公式编号以可编辑文字保留，不提供自动编号或交叉引用更新。
+- 页面布局、字体替换和很长的表格或公式，需要在目标 Word/WPS 环境中检查。

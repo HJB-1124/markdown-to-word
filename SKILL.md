@@ -29,6 +29,15 @@ When `--reference-doc` is omitted, the script applies these defaults:
 
 These defaults are applied automatically; no additional flags or template are needed. A supplied `--reference-doc` takes precedence: the script skips these built-in defaults and lets Pandoc apply the template's styles and layout.
 
+## Formula integrity
+
+- Explicitly support `\(...\)`, `\[...\]`, `$...$` and `$$...$$`. Files with either .md or .txt extensions are parsed as Markdown.
+- Parse a Pandoc JSON document before writing Word; code examples stay literal.
+- Preserve `\tag{n}` and `\tag*{label}` as editable labels beside their equations. These are not automatic Word numbering fields.
+- Stop on Pandoc warnings or unconverted raw TeX. Show the diagnostic instead of delivering a missing formula or plain-text fallback.
+- Validate the DOCX archive, native equation counts in the body and notes, display equations, nonempty equation objects, and simple explicit labels before replacing the output.
+- The success summary reports verified equation counts. These structural checks do not prove the mathematical correctness of the source text.
+
 ## Dependencies
 - `uv` must be installed and available in the system path.
 - Python dependencies (such as `python-docx`) are managed automatically by `uv`.
@@ -42,7 +51,9 @@ When invoking this skill, agents should adhere to the following rules:
 4. **Do not combine** `--reference-doc` with `--first-line-indent` (the script ignores it anyway).
 5. **Supply `--resource-path`** only when using `--stdin` or `--text` with local images, or when image paths should be resolved relative to a directory other than the Markdown file's directory. (When using `--input-file`, the script automatically defaults to the input file's directory).
 6. **Use `--text`** only for short, simple content.
-7. After conversion, verify that the process exited successfully (code 0) and that the output file exists and is non-empty. Finally, report the absolute path to the user.
+7. Require a successful conversion and its native-equation validation summary. A nonempty DOCX alone does not establish that formulas survived. Review representative fractions, accents, subscripts, cases and labels when visual inspection is available, and distinguish structural from visual checks.
+8. Review warnings about pasted source filename markers. When the user wants cleaned prose and these are clearly citation artifacts, use `--strip-source-markers`. Otherwise preserve the source. The option excludes code, math and normal numbered references such as [1].
+9. Report the absolute output path after validation succeeds. Surface conversion failures and unresolved content issues instead of reporting the file as valid.
 
 ## Quick Start
 To use the skill, run the helper script `convert.py`.
@@ -50,11 +61,11 @@ To use the skill, run the helper script `convert.py`.
 **For Agent-generated content:** Using standard input (`--stdin`) is **highly recommended**.
 ```powershell
 # Using a Here-String in PowerShell
-@"
+@'
 # Title
 
-`$`$E=mc^2`$`$
-"@ | uv run "$HOME\.gemini\config\skills\markdown-to-word\scripts\convert.py" convert --stdin --output "output.docx"
+$$E=mc^2$$
+'@ | uv run "$HOME\.gemini\config\skills\markdown-to-word\scripts\convert.py" convert --stdin --output "output.docx"
 ```
 
 **For existing files:** Use `--input-file` to automatically handle resources and avoid PowerShell pipe parsing.
@@ -71,7 +82,7 @@ A CLI script that handles executing the conversion process, discovering or downl
 
 **Arguments for `convert`:**
 - `--stdin`: (Recommended) Read raw text or markdown from standard input.
-- `--input-file`: The path to an existing `.md` file to convert.
+- `--input-file`: The path to an existing UTF-8 Markdown file (.md or .txt) to convert.
 - `--text`: The raw text or markdown to be converted via command line argument.
   *(Note: You must provide exactly ONE of `--stdin`, `--input-file`, or `--text`)*
 - `--output`: (Required) Destination path for the `.docx` file.
@@ -79,6 +90,8 @@ A CLI script that handles executing the conversion process, discovering or downl
 - `--resource-path`: (Optional) Directory relative to which Markdown image paths should be resolved.
 - `--first-line-indent`: (Optional, compatibility flag) Body paragraphs already receive a two-character first-line indent by default; no flag is needed. Table contents remain centered with no paragraph indentation. **Note: Ignored if `--reference-doc` is used.**
 - `--pandoc-path`: (Optional) Path to a custom pandoc executable. If valid, this takes priority over the system `PATH` and automated downloads.
+
+- `--strip-source-markers`: (Optional) Remove pasted filename citations such as `(2024TPAMI)Paper_Name…` from prose. Detection is automatic; removal is opt-in and excludes code and math.
 
 ## Examples
 
@@ -102,6 +115,10 @@ The script locates Pandoc in the following order:
 ## Common Mistakes
 - **Omitting Required Output**: The `--output` argument is strictly required.
 - **Providing Multiple Inputs**: Supplying more than one of `--text`, `--input-file`, or `--stdin` will result in an error. Choose exactly one.
-- **Malformed LaTeX**: If the provided LaTeX is severely malformed, Pandoc will fail to compile it and return a non-zero exit code. The script will surface stderr to help identify the parse error.
+- **Unsupported or malformed LaTeX**: Pandoc warnings, residual raw TeX and failed equation checks return a nonzero exit code with diagnostics. Correct the source instead of accepting plain-text fallback.
 - **Overusing `--text`**: Do not use `--text` for large reports. Use `--stdin` or `--input-file` instead.
 - **Incorrect `--resource-path`**: Ensure the resource path aligns with how images are referenced in the Markdown. If `--input-file` is used, you often don't need this parameter at all.
+
+## Regression checks
+
+Run `uv run scripts/test_convert.py` from this skill directory after changing the converter. Tests use temporary outputs and cover mixed delimiters, labels, failed formulas, output preservation, source-marker cleanup, literal code, UTF-8 input, templates, notes, lists, tables and images.
