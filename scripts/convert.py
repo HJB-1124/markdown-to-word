@@ -28,8 +28,9 @@ try:
 except ImportError:
     DOCX_AVAILABLE = False
 
-# Paths
-PANDOC_TOOL_DIR = Path.home() / ".gemini" / "tools" / "pandoc"
+# Resolve the canonical skill directory so junctions share one dependency cache.
+SKILL_ROOT = Path(__file__).resolve().parents[1]
+PANDOC_TOOL_DIR = SKILL_ROOT / ".tools" / "pandoc"
 PANDOC_VERSION = "3.1.13"
 PANDOC_ZIP_URL = f"https://github.com/jgm/pandoc/releases/download/{PANDOC_VERSION}/pandoc-{PANDOC_VERSION}-windows-x86_64.zip"
 PANDOC_EXPECTED_SHA256 = "347b250e855d0cb4bf9e7dcda3b55a2b5bdae588e637a363810008b75be5ca81"
@@ -44,6 +45,68 @@ DEFAULT_FIRST_LINE_CHARS = "200"  # Word stores firstLineChars in hundredths of 
 DEFAULT_FIRST_LINE_TWIPS = "420"  # 21 pt fallback for readers without character-unit support.
 DEFAULT_PAGE_WIDTH_TWIPS = "11906"  # A4 portrait: 210 x 297 mm.
 DEFAULT_PAGE_HEIGHT_TWIPS = "16838"
+
+
+DEFAULT_TABLE_HEADER_FILL = "F2F2F2"
+DEFAULT_TABLE_BORDER_COLOR = "D9D9D9"
+DEFAULT_TABLE_BORDER_SIZE = "4"  # Eighths of a point: 0.5 pt.
+
+
+def apply_default_table_formatting(root):
+    """Give actual table headers a gray fill and every cell a light-gray grid."""
+    def ensure(parent, tag, before=()):
+        child = parent.find(qn(tag))
+        if child is None:
+            child = OxmlElement(tag)
+            following_tags = {qn(name) for name in before}
+            following = next((node for node in parent if node.tag in following_tags), None)
+            if following is None:
+                parent.append(child)
+            else:
+                following.addprevious(child)
+        return child
+
+    def set_borders(parent, tag, edges, before):
+        borders = ensure(parent, tag, before)
+        for edge in edges:
+            border = ensure(borders, f"w:{edge}")
+            border.attrib.clear()
+            for attribute, value in (
+                ("val", "single"), ("color", DEFAULT_TABLE_BORDER_COLOR),
+                ("sz", DEFAULT_TABLE_BORDER_SIZE), ("space", "0"),
+            ):
+                border.set(qn(f"w:{attribute}"), value)
+
+    cell_border_followers = (
+        "w:shd", "w:noWrap", "w:tcMar", "w:textDirection", "w:tcFitText",
+        "w:vAlign", "w:hideMark", "w:headers", "w:cellIns", "w:cellDel",
+        "w:cellMerge", "w:tcPrChange",
+    )
+    for table in root.iter(qn("w:tbl")):
+        properties = ensure(table, "w:tblPr", ("w:tblGrid", "w:tr"))
+        set_borders(
+            properties, "w:tblBorders",
+            ("top", "left", "bottom", "right", "insideH", "insideV"),
+            ("w:shd", "w:tblLayout", "w:tblCellMar", "w:tblLook",
+             "w:tblCaption", "w:tblDescription", "w:tblPrChange"),
+        )
+        for row in table.findall(qn("w:tr")):
+            header = row.find(f"{qn('w:trPr')}/{qn('w:tblHeader')}")
+            is_header = header is not None and header.get(qn("w:val"), "true") not in {
+                "0", "false", "off",
+            }
+            # Direct children only: nested tables apply their own header state.
+            for cell in row.findall(qn("w:tc")):
+                properties = cell.get_or_add_tcPr()
+                set_borders(
+                    properties, "w:tcBorders", ("top", "left", "bottom", "right"),
+                    cell_border_followers,
+                )
+                shade = ensure(properties, "w:shd", cell_border_followers[1:])
+                shade.attrib.clear()
+                shade.set(qn("w:val"), "clear")
+                shade.set(qn("w:color"), "auto")
+                shade.set(qn("w:fill"), DEFAULT_TABLE_HEADER_FILL if is_header else "FFFFFF")
 
 
 def apply_default_formatting(output_path):
@@ -260,6 +323,8 @@ def apply_default_formatting(output_path):
                 for properties in formula.iter(qn("w:rPr")):
                     set_fonts(properties.get_or_add_rFonts(), DEFAULT_MATH_FONT, DEFAULT_MATH_FONT)
 
+            apply_default_table_formatting(root)
+
             # Cover nested tables and tables in headers, footers and footnotes too.
             for cell in root.iter(qn("w:tc")):
                 cell.get_or_add_tcPr().get_or_add_vAlign().set(qn("w:val"), "center")
@@ -337,7 +402,7 @@ def download_with_retry(url, dest_path, max_retries=3):
                 sys.exit(1)
 
 def ensure_pandoc_installed(pandoc_path=None):
-    """Ensure pandoc is installed in the global tools directory, or use provided/system path."""
+    """Use a custom Pandoc, this skill's cache, or PATH; install into the skill cache."""
     if pandoc_path:
         p = Path(pandoc_path)
         if p.exists():
@@ -345,13 +410,13 @@ def ensure_pandoc_installed(pandoc_path=None):
         else:
             print(f"Warning: Provided pandoc path does not exist: {pandoc_path}", file=sys.stderr)
 
+    if PANDOC_EXE.is_file():
+        return PANDOC_EXE
+
     system_pandoc = shutil.which("pandoc")
     if system_pandoc:
         print(f"Using system Pandoc found at: {system_pandoc}", file=sys.stderr)
         return Path(system_pandoc)
-
-    if PANDOC_EXE.exists():
-        return PANDOC_EXE
         
     print("Pandoc not found locally. Preparing to install...", file=sys.stderr)
     PANDOC_TOOL_DIR.mkdir(parents=True, exist_ok=True)
@@ -405,6 +470,29 @@ def run_pandoc(command, content):
     if result.returncode:
         raise ConversionError(f"Pandoc failed with exit code {result.returncode}.")
     return result.stdout
+
+
+def remove_horizontal_rules(document):
+    """Drop parsed thematic-break blocks without changing Markdown source text."""
+    removed = 0
+
+    def visit(value):
+        nonlocal removed
+        if isinstance(value, dict):
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            retained = []
+            for child in value:
+                if isinstance(child, dict) and child.get("t") == "HorizontalRule":
+                    removed += 1
+                else:
+                    visit(child)
+                    retained.append(child)
+            value[:] = retained
+
+    visit(document)
+    return removed
 
 
 def process_source_markers(document, strip=False):
@@ -607,6 +695,10 @@ def convert(args):
         content,
     )
     document = json.loads(parsed)
+    if not getattr(args, "keep_horizontal_rules", False):
+        removed_rules = remove_horizontal_rules(document)
+        if removed_rules:
+            print(f"Removed {removed_rules} Markdown horizontal rules.", file=sys.stderr)
     strip_markers = getattr(args, "strip_source_markers", False)
     marker_count, marker_samples = process_source_markers(document, strip=strip_markers)
     if marker_count:
@@ -674,6 +766,10 @@ def main():
     parser_convert.add_argument(
         "--strip-source-markers", action="store_true",
         help="Remove pasted filename citations such as (2024TPAMI)Paper_Name… from prose",
+    )
+    parser_convert.add_argument(
+        "--keep-horizontal-rules", action="store_true",
+        help="Keep Markdown thematic breaks such as ---; they are omitted by default",
     )
     args = parser.parse_args()
     try:

@@ -24,6 +24,8 @@ spec.loader.exec_module(converter)
 NS = {
     "w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
     "m": "http://schemas.openxmlformats.org/officeDocument/2006/math",
+    "v": "urn:schemas-microsoft-com:vml",
+    "o": "urn:schemas-microsoft-com:office:office",
 }
 
 
@@ -187,6 +189,8 @@ Note[^n].
         self.assertEqual(count, 5)
         self.assertIn("Validated 5", result.stdout)
         self.assertEqual(Document(output).styles["Normal"].font.name, "Arial")
+        self.assertFalse(body.xpath("//w:tblPr/w:tblBorders", namespaces=NS))
+        self.assertFalse(body.xpath("//w:tcPr/w:shd[@w:fill='F2F2F2']", namespaces=NS))
         self.assertEqual(len(body.xpath("//w:tbl", namespaces=NS)), 1)
 
     def test_default_layout_and_lists_survive_ast_conversion(self):
@@ -200,6 +204,77 @@ Note[^n].
         for cell in root.xpath("//w:tc", namespaces=NS):
             self.assertEqual(cell.xpath("./w:tcPr/w:vAlign/@w:val", namespaces=NS), ["center"])
             self.assertTrue(cell.xpath(".//w:jc[@w:val='center']", namespaces=NS))
+
+    def test_default_gray_table_headers_and_complete_grid(self):
+        output, _ = self.convert(
+            "| Value | Meaning |\n|---|---|\n| $x$ | Symbol |\n"
+        )
+        root = self.xml(output)
+        table = root.xpath("//w:tbl", namespaces=NS)[0]
+        for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
+            border = table.xpath(f"./w:tblPr/w:tblBorders/w:{edge}", namespaces=NS)[0]
+            self.assertEqual(border.get(f"{{{NS['w']}}}color"), "D9D9D9")
+            self.assertEqual(border.get(f"{{{NS['w']}}}sz"), "4")
+            self.assertEqual(border.get(f"{{{NS['w']}}}val"), "single")
+        rows = table.xpath("./w:tr", namespaces=NS)
+        self.assertTrue(rows[0].xpath("./w:trPr/w:tblHeader", namespaces=NS))
+        for index, row in enumerate(rows):
+            for cell in row.xpath("./w:tc", namespaces=NS):
+                self.assertEqual(
+                    cell.xpath("./w:tcPr/w:shd/@w:fill", namespaces=NS),
+                    ["F2F2F2" if index == 0 else "FFFFFF"],
+                )
+                for edge in ("top", "left", "bottom", "right"):
+                    self.assertEqual(
+                        cell.xpath(f"./w:tcPr/w:tcBorders/w:{edge}/@w:color", namespaces=NS),
+                        ["D9D9D9"],
+                    )
+        self.assertEqual(len(root.xpath("//m:oMath", namespaces=NS)), 1)
+
+    def test_separator_filter_preserves_code_tables_metadata_and_headings(self):
+        fence = chr(96) * 3
+        text = (
+            '---\ntitle: "YAML retained $t$"\n---\n\n'
+            'Setext heading\n---\n\n'
+            'Before.\n\n---\n\nAfter.\n\n'
+            '> Quote before.\n>\n> ---\n>\n> Quote after.\n\n'
+            'Literal ' + chr(96) + '---' + chr(96) + '.\n\n'
+            + fence + '\n---\n' + fence + '\n\n'
+            '| A | B |\n|---|---|\n| 1 | 2 |\n\n'
+            + r'\[\boxed{x=1}\]' + '\n\nNote[^n].\n\n'
+            '[^n]: Footnote before.\n\n    ---\n\n    Footnote after.\n'
+        )
+        output, result = self.convert(text)
+        root, notes = self.xml(output), self.xml(output, "word/footnotes.xml")
+        self.assertFalse(root.xpath("//w:pPr/w:pBdr", namespaces=NS))
+        self.assertFalse(notes.xpath("//w:pPr/w:pBdr", namespaces=NS))
+        self.assertFalse(root.xpath("//v:rect[@o:hr='t']", namespaces=NS))
+        self.assertFalse(notes.xpath("//v:rect[@o:hr='t']", namespaces=NS))
+        content = "".join(root.itertext())
+        for token in ("YAML retained", "Setext heading", "Before.", "After.", "Quote before.", "Quote after."):
+            self.assertIn(token, content)
+        self.assertIn("Footnote before.", "".join(notes.itertext()))
+        self.assertIn("Footnote after.", "".join(notes.itertext()))
+        self.assertEqual(root.xpath("//w:t[text()='---']/text()", namespaces=NS), ["---", "---"])
+        self.assertTrue(root.xpath("//w:pStyle[@w:val='Heading2']", namespaces=NS))
+        self.assertEqual(len(root.xpath("//w:tbl", namespaces=NS)), 1)
+        self.assertEqual(len(root.xpath("//w:tbl/w:tr", namespaces=NS)), 2)
+        self.assertEqual(len(root.xpath("//m:oMath", namespaces=NS)), 2)
+        self.assertEqual(len(root.xpath("//m:borderBox", namespaces=NS)), 1)
+        self.assertIn("Removed 3 Markdown horizontal rules", result.stderr)
+
+    def test_horizontal_rules_can_be_preserved_explicitly(self):
+        output, result = self.convert(
+            "Before.\n\n---\n\nAfter.\n\n| A |\n|---|\n| 1 |\n",
+            ["--keep-horizontal-rules"],
+        )
+        root = self.xml(output)
+        self.assertEqual(len(root.xpath("//v:rect[@o:hr='t']", namespaces=NS)), 1)
+        self.assertNotIn("Removed", result.stderr)
+        self.assertEqual(
+            root.xpath("//w:tbl/w:tr[1]/w:tc/w:tcPr/w:shd/@w:fill", namespaces=NS),
+            ["F2F2F2"],
+        )
 
     def test_stdin_and_explicit_starred_tags(self):
         output, _ = self.convert("中文测试 " + r"\[x=1\tag*{S1}\]", stdin=True)
@@ -225,6 +300,60 @@ Note[^n].
         result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len(self.xml(direct).xpath("//m:oMath", namespaces=NS)), 1)
+
+
+
+class PandocInstallationTests(unittest.TestCase):
+    """The installer must work from a relocated skill without a user-home cache."""
+
+    def setUp(self):
+        from unittest import mock
+        self.mock = mock
+        self.temp = tempfile.TemporaryDirectory(prefix="pandoc-relocation-test-")
+        self.root = Path(self.temp.name) / "relocated-skill"
+        scripts = self.root / "scripts"
+        scripts.mkdir(parents=True)
+        relocated = scripts / "convert.py"
+        shutil.copyfile(CONVERTER, relocated)
+        spec = importlib.util.spec_from_file_location("relocated_word_converter", relocated)
+        self.module = importlib.util.module_from_spec(spec)
+        with self.mock.patch.object(Path, "home", side_effect=AssertionError("No home-directory dependency is allowed")):
+            spec.loader.exec_module(self.module)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_local_pandoc_is_used_without_path_lookup_or_download(self):
+        binary = self.root / ".tools" / "pandoc" / f"pandoc-{self.module.PANDOC_VERSION}" / "pandoc.exe"
+        binary.parent.mkdir(parents=True)
+        binary.write_bytes(b"local-pandoc-fixture")
+        with self.mock.patch.object(self.module.shutil, "which", side_effect=AssertionError("Local cache must precede PATH")), \
+             self.mock.patch.object(self.module, "download_with_retry", side_effect=AssertionError("Cached binary must not download")):
+            self.assertEqual(self.module.ensure_pandoc_installed(), binary)
+
+    def test_fresh_verified_download_installs_inside_relocated_skill(self):
+        import hashlib
+        from io import BytesIO
+        payload = b"verified-install-fixture"
+        archive_data = BytesIO()
+        relative_binary = f"pandoc-{self.module.PANDOC_VERSION}/pandoc.exe"
+        with zipfile.ZipFile(archive_data, "w") as archive:
+            archive.writestr(relative_binary, payload)
+        archive_bytes = archive_data.getvalue()
+        received = []
+
+        def download(_url, destination):
+            received.append(Path(destination))
+            Path(destination).write_bytes(archive_bytes)
+
+        with self.mock.patch.object(self.module.shutil, "which", return_value=None), \
+             self.mock.patch.object(self.module, "download_with_retry", side_effect=download), \
+             self.mock.patch.object(self.module, "PANDOC_EXPECTED_SHA256", hashlib.sha256(archive_bytes).hexdigest()):
+            binary = self.module.ensure_pandoc_installed()
+        self.assertEqual(binary, self.root / ".tools" / "pandoc" / relative_binary)
+        self.assertEqual(binary.read_bytes(), payload)
+        self.assertEqual(received, [self.root / ".tools" / "pandoc" / "pandoc.zip"])
+        self.assertFalse(received[0].exists(), "Installer must remove the temporary archive.")
 
 
 if __name__ == "__main__":

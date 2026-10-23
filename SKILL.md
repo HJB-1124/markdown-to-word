@@ -11,7 +11,7 @@ description: >-
 ## Overview
 This skill converts Markdown (including Pandoc-supported LaTeX mathematical formulas) into a native Microsoft Word (`.docx`) file. It uses `Pandoc` under the hood to ensure LaTeX equations are properly converted into Word's native Office Math Markup Language (OMML), making them editable inside Word. It decouples content generation from document formatting, allowing you to focus on Markdown semantics while producing standard Word files.
 
-If Pandoc is not provided or found in the system `PATH`, the script safely downloads and caches a verified version (using SHA-256 integrity checks) to `~/.gemini/tools/pandoc/`.
+If Pandoc is not provided or found in the system `PATH`, the script safely downloads and caches a verified version (using SHA-256 integrity checks) to `<skill-directory>/.tools/pandoc/`, resolved from the real script location so both agents use the same cache.
 
 ## Default Word Formatting
 When `--reference-doc` is omitted, the script applies these defaults:
@@ -25,9 +25,16 @@ When `--reference-doc` is omitted, the script applies these defaults:
 - Bullet and numbered lists: preserve their list styles, numbering and indentation. Pandoc's tight lists keep **Compact**, with the same body fonts, size and black color; do not normalize lists to Normal or apply the body first-line indent.
 - All text: **black (`#000000`)**, including headings, hyperlinks, code highlighting and formulas.
 - Table contents: **centered horizontally and vertically** in every cell, including header rows and nested tables. Clear paragraph indentation inside cells so content remains centered; center display equations inside cells too.
+- Table appearance: **light-gray header rows (`#F2F2F2`)**, white body cells, and a **complete light-gray grid (`#D9D9D9`, 0.5 pt)**. Apply explicit borders to tables and cells so inherited table styles cannot hide grid lines.
 - Headings retain Pandoc's heading sizes and emphasis.
 
 These defaults are applied automatically; no additional flags or template are needed. A supplied `--reference-doc` takes precedence: the script skips these built-in defaults and lets Pandoc apply the template's styles and layout.
+
+## Section separators
+
+Omit Markdown thematic breaks such as a standalone `---` by default. Filtering happens after Markdown parsing, so YAML metadata, Setext heading underlines, table separator rows, and literal code remain intact. Table borders and boxed equations are unaffected.
+
+Use `--keep-horizontal-rules` only when the user asks to retain section separators. This content filter also applies when using a Word template; the template still controls table appearance.
 
 ## Formula integrity
 
@@ -65,12 +72,12 @@ To use the skill, run the helper script `convert.py`.
 # Title
 
 $$E=mc^2$$
-'@ | uv run "$HOME\.gemini\config\skills\markdown-to-word\scripts\convert.py" convert --stdin --output "output.docx"
+'@ | uv run "$HOME\.agents\skills\markdown-to-word\scripts\convert.py" convert --stdin --output "output.docx"
 ```
 
 **For existing files:** Use `--input-file` to automatically handle resources and avoid PowerShell pipe parsing.
 ```powershell
-uv run "$HOME\.gemini\config\skills\markdown-to-word\scripts\convert.py" convert --input-file ".\report.md" --output ".\output.docx"
+uv run "$HOME\.agents\skills\markdown-to-word\scripts\convert.py" convert --input-file ".\report.md" --output ".\output.docx"
 ```
 
 ## Utility Scripts
@@ -91,25 +98,26 @@ A CLI script that handles executing the conversion process, discovering or downl
 - `--first-line-indent`: (Optional, compatibility flag) Body paragraphs already receive a two-character first-line indent by default; no flag is needed. Table contents remain centered with no paragraph indentation. **Note: Ignored if `--reference-doc` is used.**
 - `--pandoc-path`: (Optional) Path to a custom pandoc executable. If valid, this takes priority over the system `PATH` and automated downloads.
 
+- `--keep-horizontal-rules`: (Optional) Preserve Markdown section separators such as `---`; omitted by default.
 - `--strip-source-markers`: (Optional) Remove pasted filename citations such as `(2024TPAMI)Paper_Name…` from prose. Detection is automatic; removal is opt-in and excludes code and math.
 
 ## Examples
 
 **Using a template and an input file (images in a separate folder):**
 ```powershell
-uv run "$HOME\.gemini\config\skills\markdown-to-word\scripts\convert.py" convert --input-file "report.md" --output "final.docx" --reference-doc "corporate_template.docx" --resource-path ".\assets\images"
+uv run "$HOME\.agents\skills\markdown-to-word\scripts\convert.py" convert --input-file "report.md" --output "final.docx" --reference-doc "corporate_template.docx" --resource-path ".\assets\images"
 ```
 
 **Using direct text input with default formatting:**
 ```powershell
-uv run "$HOME\.gemini\config\skills\markdown-to-word\scripts\convert.py" convert --text "Hello **World**!" --output "hello.docx"
+uv run "$HOME\.agents\skills\markdown-to-word\scripts\convert.py" convert --text "Hello **World**!" --output "hello.docx"
 ```
 
 ## Pandoc Resolution Order
 The script locates Pandoc in the following order:
 1. Valid custom path provided via `--pandoc-path`.
-2. Existing installation in the system `PATH`.
-3. Previously cached automated download.
+2. The cached installation in this skill's `.tools/pandoc/` directory.
+3. Existing installation in the system `PATH`.
 4. If none are found, securely downloads the Windows x86-64 binary, verifies its SHA-256 hash, and installs it.
 
 ## Common Mistakes
@@ -121,4 +129,4 @@ The script locates Pandoc in the following order:
 
 ## Regression checks
 
-Run `uv run scripts/test_convert.py` from this skill directory after changing the converter. Tests use temporary outputs and cover mixed delimiters, labels, failed formulas, output preservation, source-marker cleanup, literal code, UTF-8 input, templates, notes, lists, tables and images.
+Run `uv run scripts/test_convert.py` from this skill directory after changing the converter. Tests use temporary outputs and cover mixed delimiters, labels, failed formulas, output preservation, source-marker cleanup, literal code, UTF-8 input, templates, notes, lists, gray table headers and grid borders, section-separator filtering and images.

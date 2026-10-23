@@ -2,6 +2,8 @@
 
 将 Markdown 和 Pandoc 支持的 LaTeX 数学公式转换为 Microsoft Word（`.docx`）。公式使用 Word 原生 OMML 格式，可在 Word/WPS 中继续编辑。
 
+默认使用浅灰表头和完整浅灰网格线；Markdown 章节分隔线默认不输出，可用 `--keep-horizontal-rules` 保留。自定义 Word 模板可覆盖默认排版。
+
 仓库同时提供供 Agent 使用的 [SKILL.md](SKILL.md)、[转换脚本](scripts/convert.py)和[回归测试](scripts/test_convert.py)。
 
 ## 快速开始
@@ -19,9 +21,13 @@ uv run scripts/convert.py convert --input-file "notes.md" --output "notes.docx"
 Pandoc 按以下顺序查找：
 
 1. `--pandoc-path` 指定的可执行文件。
-2. 系统 `PATH` 中的 Pandoc。
-3. `~/.gemini/tools/pandoc/` 中的缓存版本。
-4. 均未找到时，下载内置的 Windows x86-64 版本并校验 SHA-256。
+2. 本 skill 目录下 `.tools/pandoc/` 中的缓存版本。
+3. 系统 `PATH` 中的 Pandoc。
+4. 均未找到时，下载内置的 Windows x86-64 版本到本 skill 的 `.tools/pandoc/`，并校验 SHA-256。
+
+依赖目录按转换脚本的真实位置解析，与当前工作目录无关；通过目录联接调用时也使用同一份缓存，不依赖 Antigravity 配置目录。
+
+`.tools/` 是脚本管理的本地运行缓存，已由 `.gitignore` 排除。克隆仓库后可按需安装，无需将 Pandoc 可执行文件提交到仓库。
 
 macOS 和 Linux 请预先安装 Pandoc，或通过 `--pandoc-path` 指定路径。
 
@@ -106,8 +112,22 @@ uv run scripts/convert.py convert --input-file "translation.txt" --output "trans
 | 标题 | 保留 Pandoc 的标题层级、字号和强调 |
 | 文字颜色 | 全文黑色，包括超链接、代码高亮和公式 |
 | 表格 | 所有单元格内容水平、垂直居中；取消单元格内段落缩进 |
+| 表头底色 | 浅灰色 `#F2F2F2`，正文单元格为白色 |
+| 表格边框 | 完整浅灰网格线 `#D9D9D9`，0.5 磅，包含外框与内部横竖线 |
 
 标题、独立公式、列表和代码块保留各自的对齐方式。正文通过样式继承首行缩进，重新应用 Normal 或新建正文段落时仍可保留。查看文档的设备需要安装相应字体；宽表格与长公式可能需要调整列宽或换行。
+
+### 章节分隔线
+
+默认忽略 Markdown 中独立的 `---` 等章节分隔线。过滤在 Pandoc 解析后执行，只移除分隔线节点；代码中的字面内容、YAML 元数据、Setext 标题下划线和表格分隔行保持原有含义。表格边框与公式框不受影响。
+
+需要保留章节分隔线时，显式使用：
+
+```powershell
+uv run scripts/convert.py convert --input-file "notes.md" --output "notes.docx" --keep-horizontal-rules
+```
+
+这项内容过滤同样适用于自定义模板；模板仍优先决定表格外观。
 
 ### 使用 Word 模板
 
@@ -161,6 +181,7 @@ uv run scripts/convert.py convert --input-file "notes.md" --output "notes.docx" 
 | `--reference-doc PATH` | 使用 Word 模板，替代内置排版 |
 | `--resource-path PATH` | 指定本地图片等资源所在目录 |
 | `--pandoc-path PATH` | 指定 Pandoc 可执行文件 |
+| `--keep-horizontal-rules` | 保留 Markdown 章节分隔线；默认忽略 |
 | `--strip-source-markers` | 删除匹配的来源文件名残留；默认仅检测提示 |
 | `--first-line-indent` | 兼容参数；默认正文已有两字符首行缩进 |
 
@@ -174,7 +195,7 @@ uv run scripts/convert.py convert --input-file "notes.md" --output "notes.docx" 
 uv run scripts/test_convert.py
 ```
 
-当前包含 9 项行为回归测试，覆盖混合公式分隔符、希腊字母、上下标、分段公式、公式标签、转换失败时保护旧文件、引用残留清理、代码保护、UTF-8 中文输入、Word 模板、脚注、列表、表格与相对路径图片。测试产物写入临时目录；需要可用的 Pandoc，未找到时测试会跳过。
+行为回归测试覆盖混合公式分隔符、希腊字母、上下标、分段公式、公式标签、转换失败时保护旧文件、引用残留清理、代码保护、UTF-8 中文输入、Word 模板、脚注、列表、浅灰表头与网格线、章节分隔线过滤及其保留开关、相对路径图片，以及 Pandoc 迁移和安装。测试产物写入临时目录；需要可用的 Pandoc，未找到时测试会跳过。
 
 ## 范围与限制
 
