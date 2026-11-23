@@ -16,6 +16,7 @@ from pathlib import Path
 from lxml import etree
 from docx import Document
 from docx.shared import Pt
+from docx.enum.section import WD_SECTION_START
 
 CONVERTER = Path(__file__).with_name("convert.py")
 spec = importlib.util.spec_from_file_location("word_converter", CONVERTER)
@@ -191,6 +192,8 @@ Note[^n].
         self.assertEqual(Document(output).styles["Normal"].font.name, "Arial")
         self.assertFalse(body.xpath("//w:tblPr/w:tblBorders", namespaces=NS))
         self.assertFalse(body.xpath("//w:tcPr/w:shd[@w:fill='F2F2F2']", namespaces=NS))
+        self.assertFalse(body.xpath("//w:tblPr/w:jc", namespaces=NS))
+        self.assertFalse(body.xpath("//w:tblPr/w:tblCellMar", namespaces=NS))
         self.assertEqual(len(body.xpath("//w:tbl", namespaces=NS)), 1)
 
     def test_default_layout_and_lists_survive_ast_conversion(self):
@@ -230,6 +233,86 @@ Note[^n].
                         ["D9D9D9"],
                     )
         self.assertEqual(len(root.xpath("//m:oMath", namespaces=NS)), 1)
+
+    def test_short_and_wide_tables_are_centered_and_fill_text_width(self):
+        output, _ = self.convert(
+            "| Material | Emissivity | Transmission |\n|---|---:|---:|\n| Film | 0.06 | 70% |\n\n"
+            "| Method | Description |\n|---|---|\n| MIC | A longer explanation that must wrap within the table. |\n"
+        )
+        root = self.xml(output)
+        self.assertEqual(len(root.xpath("//w:tbl", namespaces=NS)), 2)
+        expected_width = 11906 - 1800 - 1800
+        for table in root.xpath("//w:tbl", namespaces=NS):
+            self.assertEqual(table.xpath("./w:tblPr/w:jc/@w:val", namespaces=NS), ["center"])
+            self.assertEqual(table.xpath("./w:tblPr/w:tblW/@w:type", namespaces=NS), ["pct"])
+            self.assertEqual(table.xpath("./w:tblPr/w:tblW/@w:w", namespaces=NS), ["5000"])
+            self.assertEqual(table.xpath("./w:tblPr/w:tblInd/@w:w", namespaces=NS), ["0"])
+            self.assertEqual(table.xpath("./w:tblPr/w:tblLayout/@w:type", namespaces=NS), ["fixed"])
+            widths = list(map(int, table.xpath("./w:tblGrid/w:gridCol/@w:w", namespaces=NS)))
+            self.assertEqual(sum(widths), expected_width)
+            for side in ("left", "right"):
+                self.assertEqual(table.xpath(f"./w:tblPr/w:tblCellMar/w:{side}/@w:w", namespaces=NS), ["108"])
+            for index, row in enumerate(table.xpath("./w:tr", namespaces=NS)):
+                self.assertTrue(row.xpath("./w:trPr/w:cantSplit[@w:val='1']", namespaces=NS))
+                self.assertEqual(list(map(int, row.xpath("./w:tc/w:tcPr/w:tcW/@w:w", namespaces=NS))), widths)
+                for p in row.xpath("./w:tc/w:p", namespaces=NS):
+                    self.assertEqual(p.xpath("./w:pPr/w:keepNext/@w:val", namespaces=NS), ["1" if index == 0 else "0"])
+                    self.assertEqual(p.xpath("./w:pPr/w:spacing/@w:before", namespaces=NS), ["60"])
+                    self.assertEqual(p.xpath("./w:pPr/w:spacing/@w:after", namespaces=NS), ["60"])
+                    self.assertEqual(p.xpath("./w:pPr/w:spacing/@w:line", namespaces=NS), ["264"])
+                    self.assertEqual(p.xpath("./w:pPr/w:ind/@w:firstLineChars", namespaces=NS), ["0"])
+
+    def test_table_geometry_preserves_proportions_merges_and_nested_width(self):
+        document = Document()
+        document.sections[0].left_margin = Pt(54)
+        document.sections[0].right_margin = Pt(72)
+        table = document.add_table(rows=2, cols=2)
+        table.columns[0].width = Pt(72)
+        table.columns[1].width = Pt(216)
+        table.cell(0, 0).merge(table.cell(0, 1)).text = "Merged heading"
+        table.cell(1, 0).text = "Label"
+        table.cell(1, 1).text = "Details"
+        nested = table.cell(1, 1).add_table(rows=1, cols=2)
+        nested.cell(0, 0).text = "A"
+        nested.cell(0, 1).text = "B"
+        for part in (document.sections[0].header, document.sections[0].footer):
+            part.add_table(rows=1, cols=2, width=Pt(288)).cell(0, 0).text = "Auxiliary table"
+        output = self.folder / "geometry.docx"
+        document.save(output)
+        before_text = self.xml(output).xpath("//w:t/text()", namespaces=NS)
+        converter.apply_default_formatting(output)
+        root = self.xml(output)
+        self.assertEqual(root.xpath("//w:t/text()", namespaces=NS), before_text)
+        outer, inner = root.xpath("//w:tbl", namespaces=NS)
+        width = 11906 - (54 + 72) * 20
+        columns = list(map(int, outer.xpath("./w:tblGrid/w:gridCol/@w:w", namespaces=NS)))
+        self.assertEqual(sum(columns), width)
+        self.assertAlmostEqual(columns[1] / columns[0], 3, places=2)
+        self.assertEqual(outer.xpath("./w:tr[1]/w:tc/w:tcPr/w:gridSpan/@w:val", namespaces=NS), ["2"])
+        self.assertEqual(outer.xpath("./w:tr[1]/w:tc/w:tcPr/w:tcW/@w:w", namespaces=NS), [str(width)])
+        nested_width = sum(map(int, inner.xpath("./w:tblGrid/w:gridCol/@w:w", namespaces=NS)))
+        self.assertEqual(nested_width, columns[1] - 216)
+        for name in ("word/header1.xml", "word/footer1.xml"):
+            part = self.xml(output, name)
+            self.assertEqual(sum(map(int, part.xpath("//w:tblGrid/w:gridCol/@w:w", namespaces=NS))), width)
+            self.assertTrue(part.xpath("//w:tblPr/w:jc[@w:val='center']", namespaces=NS))
+
+    def test_table_width_follows_its_section_margins(self):
+        document = Document()
+        document.sections[0].left_margin = Pt(54)
+        document.sections[0].right_margin = Pt(54)
+        document.add_table(rows=1, cols=2).cell(0, 0).text = "First section"
+        section = document.add_section(WD_SECTION_START.NEW_PAGE)
+        section.left_margin = Pt(90)
+        section.right_margin = Pt(72)
+        document.add_table(rows=1, cols=2).cell(0, 0).text = "Second section"
+        output = self.folder / "sections.docx"
+        document.save(output)
+        converter.apply_default_formatting(output)
+        root = self.xml(output)
+        widths = [sum(map(int, t.xpath("./w:tblGrid/w:gridCol/@w:w", namespaces=NS)))
+                  for t in root.xpath("//w:tbl", namespaces=NS)]
+        self.assertEqual(widths, [11906 - 108 * 20, 11906 - 162 * 20])
 
     def test_separator_filter_preserves_code_tables_metadata_and_headings(self):
         fence = chr(96) * 3

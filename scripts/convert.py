@@ -50,10 +50,30 @@ DEFAULT_PAGE_HEIGHT_TWIPS = "16838"
 DEFAULT_TABLE_HEADER_FILL = "F2F2F2"
 DEFAULT_TABLE_BORDER_COLOR = "D9D9D9"
 DEFAULT_TABLE_BORDER_SIZE = "4"  # Eighths of a point: 0.5 pt.
+DEFAULT_TABLE_CELL_MARGIN = 108  # 5.4 pt left/right; matches the previous reports.
+DEFAULT_PAGE_SIDE_MARGIN = 1800  # Word's 1.25-inch fallback when pgMar is absent.
 
 
-def apply_default_table_formatting(root):
-    """Give actual table headers a gray fill and every cell a light-gray grid."""
+def section_text_width(section):
+    """Available width after applying the default A4 page size."""
+    margins = section.find(qn("w:pgMar")) if section is not None else None
+    def margin(name, default):
+        return int(margins.get(qn(f"w:{name}"), default)) if margins is not None else default
+    width = int(DEFAULT_PAGE_WIDTH_TWIPS) - margin("left", DEFAULT_PAGE_SIDE_MARGIN) \
+        - margin("right", DEFAULT_PAGE_SIDE_MARGIN) - margin("gutter", 0)
+    columns = section.find(qn("w:cols")) if section is not None else None
+    if columns is not None:
+        explicit = columns.find(qn("w:col"))
+        count = max(1, int(columns.get(qn("w:num"), "1")))
+        if explicit is not None and explicit.get(qn("w:w")):
+            width = int(explicit.get(qn("w:w")))
+        elif count > 1:
+            width = (width - int(columns.get(qn("w:space"), "720")) * (count - 1)) // count
+    return max(1, width)
+
+
+def apply_default_table_formatting(root, default_width=None):
+    """Center full-width tables with consistent cell spacing, borders and paging."""
     def ensure(parent, tag, before=()):
         child = parent.find(qn(tag))
         if child is None:
@@ -82,8 +102,59 @@ def apply_default_table_formatting(root):
         "w:vAlign", "w:hideMark", "w:headers", "w:cellIns", "w:cellDel",
         "w:cellMerge", "w:tcPrChange",
     )
+    if default_width is None:
+        default_width = section_text_width(None)
     for table in root.iter(qn("w:tbl")):
         properties = ensure(table, "w:tblPr", ("w:tblGrid", "w:tr"))
+        property_order = (
+            "w:tblStyle", "w:tblpPr", "w:tblOverlap", "w:bidiVisual", "w:tblStyleRowBandSize",
+            "w:tblStyleColBandSize", "w:tblW", "w:jc", "w:tblCellSpacing", "w:tblInd",
+            "w:tblBorders", "w:shd", "w:tblLayout", "w:tblCellMar", "w:tblLook",
+            "w:tblCaption", "w:tblDescription", "w:tblPrChange",
+        )
+        for tag, attrs in (
+            ("w:tblW", {"type": "pct", "w": "5000"}),
+            ("w:jc", {"val": "center"}),
+            ("w:tblInd", {"type": "dxa", "w": "0"}),
+            ("w:tblLayout", {"type": "fixed"}),
+        ):
+            node = ensure(properties, tag, property_order[property_order.index(tag) + 1:])
+            for name, value in attrs.items():
+                node.set(qn(f"w:{name}"), value)
+        # Explicit geometry prevents short tables shrinking to their text in WPS.
+        margins = ensure(properties, "w:tblCellMar", property_order[property_order.index("w:tblCellMar") + 1:])
+        for side in ("top", "left", "bottom", "right"):
+            node = ensure(margins, f"w:{side}")
+            node.set(qn("w:type"), "dxa")
+            node.set(qn("w:w"), str(DEFAULT_TABLE_CELL_MARGIN if side in {"left", "right"} else 0))
+
+        parent_cell = next(table.iterancestors(qn("w:tc")), None)
+        if parent_cell is not None:
+            parent_properties = parent_cell.find(qn("w:tcPr"))
+            cell_width = parent_properties.find(qn("w:tcW"))
+            width = int(cell_width.get(qn("w:w")))
+            cell_margins = parent_properties.find(qn("w:tcMar"))
+            for side in ("left", "right"):
+                specific = cell_margins.find(qn(f"w:{side}")) if cell_margins is not None else None
+                width -= int(specific.get(qn("w:w"), "0")) if specific is not None else DEFAULT_TABLE_CELL_MARGIN
+        else:
+            sections = table.xpath("following::w:sectPr[1]")
+            width = section_text_width(sections[0]) if sections else default_width
+        width = max(1, width)
+        grid = ensure(table, "w:tblGrid", ("w:tr",))
+        columns = grid.findall(qn("w:gridCol"))
+        if not columns:
+            continue  # Leave an empty/no-grid table structurally intact.
+        weights = [max(1, int(column.get(qn("w:w"), "1"))) for column in columns]
+        # Scale cumulative positions so rounding cannot make the grid too wide.
+        positions = [0]
+        cumulative = 0
+        for weight in weights:
+            cumulative += weight
+            positions.append(round(width * cumulative / sum(weights)))
+        widths = [end - start for start, end in zip(positions, positions[1:])]
+        for column, column_width in zip(columns, widths):
+            column.set(qn("w:w"), str(column_width))
         set_borders(
             properties, "w:tblBorders",
             ("top", "left", "bottom", "right", "insideH", "insideV"),
@@ -91,13 +162,33 @@ def apply_default_table_formatting(root):
              "w:tblCaption", "w:tblDescription", "w:tblPrChange"),
         )
         for row in table.findall(qn("w:tr")):
+            row_properties = ensure(row, "w:trPr", ("w:tc",))
+            ensure(row_properties, "w:cantSplit", (
+                "w:trHeight", "w:tblHeader", "w:tblCellSpacing", "w:jc", "w:hidden",
+                "w:ins", "w:del", "w:trPrChange",
+            )).set(qn("w:val"), "1")
+            height = row_properties.find(qn("w:trHeight"))
+            if height is not None and height.get(qn("w:hRule")) == "exact":
+                height.set(qn("w:hRule"), "atLeast")
             header = row.find(f"{qn('w:trPr')}/{qn('w:tblHeader')}")
             is_header = header is not None and header.get(qn("w:val"), "true") not in {
                 "0", "false", "off",
             }
+            before = row_properties.find(qn("w:gridBefore"))
+            column_index = int(before.get(qn("w:val"), "0")) if before is not None else 0
             # Direct children only: nested tables apply their own header state.
             for cell in row.findall(qn("w:tc")):
                 properties = cell.get_or_add_tcPr()
+                span = properties.find(qn("w:gridSpan"))
+                column_span = int(span.get(qn("w:val"), "1")) if span is not None else 1
+                cell_width = properties.get_or_add_tcW()
+                cell_width.set(qn("w:type"), "dxa")
+                cell_width.set(qn("w:w"), str(sum(widths[column_index:column_index + column_span])))
+                column_index += column_span
+                for paragraph in cell.findall(qn("w:p")):
+                    # Repeat header rows, and keep the header attached to its first
+                    # data row instead of leaving a lone header at a page bottom.
+                    paragraph.get_or_add_pPr().get_or_add_keepNext().set(qn("w:val"), "1" if is_header else "0")
                 set_borders(
                     properties, "w:tcBorders", ("top", "left", "bottom", "right"),
                     cell_border_followers,
@@ -154,6 +245,8 @@ def apply_default_formatting(output_path):
     # WPS may replace Pandoc's style IDs with numeric IDs when saving a DOCX.
     # Resolve paragraph styles by their names as well as their original IDs.
     styles_root = parse_xml(next(data for info, data in entries if info.filename == "word/styles.xml"))
+    document_root = parse_xml(next(data for info, data in entries if info.filename == "word/document.xml"))
+    default_table_width = section_text_width(next(document_root.iter(qn("w:sectPr")), None))
     paragraph_styles = {
         style.get(qn("w:styleId")): style
         for style in styles_root.findall(qn("w:style"))
@@ -323,7 +416,7 @@ def apply_default_formatting(output_path):
                 for properties in formula.iter(qn("w:rPr")):
                     set_fonts(properties.get_or_add_rFonts(), DEFAULT_MATH_FONT, DEFAULT_MATH_FONT)
 
-            apply_default_table_formatting(root)
+            apply_default_table_formatting(root, default_table_width)
 
             # Cover nested tables and tables in headers, footers and footnotes too.
             for cell in root.iter(qn("w:tc")):
@@ -331,6 +424,9 @@ def apply_default_formatting(output_path):
                 for paragraph in cell.iter(qn("w:p")):
                     properties = paragraph.get_or_add_pPr()
                     properties.get_or_add_jc().set(qn("w:val"), "center")
+                    spacing = properties.get_or_add_spacing()
+                    for attribute, value in (("before", "60"), ("after", "60"), ("line", "264"), ("lineRule", "auto")):
+                        spacing.set(qn(f"w:{attribute}"), value)
                     indent = properties.get_or_add_ind()
                     indent.attrib.clear()
                     for attribute in ("left", "right", "firstLine", "firstLineChars"):
